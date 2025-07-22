@@ -1,0 +1,9 @@
+streamlit==1.35.0
+sentence-transformers==2.7.0
+faiss-cpu==1.7.4
+PyMuPDF==1.23.24
+python-docx==1.1.0
+numpy==1.26.4
+scipy==1.13.1
+torch>=1.12.1
+protobuf<4.0.0
