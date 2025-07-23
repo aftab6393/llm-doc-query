@@ -7,46 +7,57 @@ def process_query(query: str, doc_dir: str):
     import re
     import numpy as np
 
-    # Load PDF, Word, and Email documents from directory
+    # === Document Loader with error handling ===
     def load_documents(path):
         texts = []
         for file in os.listdir(path):
             full_path = os.path.join(path, file)
-            if file.endswith(".pdf"):
-                doc = fitz.open(full_path)
-                text = " ".join([page.get_text() for page in doc])
-                texts.append((file, text))
-            elif file.endswith(".docx"):
-                doc = docx.Document(full_path)
-                text = " ".join([p.text for p in doc.paragraphs])
-                texts.append((file, text))
-            elif file.endswith(".eml"):
-                with open(full_path, "r", encoding="utf8", errors="ignore") as f:
-                    texts.append((file, f.read()))
+            try:
+                if file.endswith(".pdf"):
+                    try:
+                        with fitz.open(full_path) as doc:
+                            text = " ".join([page.get_text() for page in doc])
+                            texts.append((file, text))
+                    except Exception as e:
+                        print(f"❌ Skipping PDF '{file}' due to MuPDF error: {e}")
+                elif file.endswith(".docx"):
+                    try:
+                        doc = docx.Document(full_path)
+                        text = " ".join([p.text for p in doc.paragraphs])
+                        texts.append((file, text))
+                    except Exception as e:
+                        print(f"❌ Skipping DOCX '{file}' due to error: {e}")
+                elif file.endswith(".eml"):
+                    try:
+                        with open(full_path, "r", encoding="utf8", errors="ignore") as f:
+                            texts.append((file, f.read()))
+                    except Exception as e:
+                        print(f"❌ Skipping EML '{file}' due to error: {e}")
+            except Exception as e:
+                print(f"⚠️ General error while reading '{file}': {e}")
         return texts
 
-    # Split text into manageable chunks
+    # === Text chunking ===
     def chunk_text(text, chunk_size=500):
         words = text.split()
-        return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+        return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-    # Create sentence embeddings
+    # === Embedding ===
     def embed_chunks(chunks):
-        embeddings = model.encode(chunks, convert_to_numpy=True)
-        return embeddings
+        return model.encode(chunks, convert_to_numpy=True)
 
-    # Search for top-k relevant chunks
+    # === Semantic Search ===
     def search(query, index, chunks):
         q_embed = model.encode([query])
         D, I = index.search(q_embed, k=3)
         return [chunks[i] for i in I[0]]
 
-    # Parse the user query for structured information
+    # === Query Parser ===
     def parse_query(query):
         age_match = re.search(r"(\d+)[ -]?(?:year|yo)?[ -]?(?:old)?", query)
         duration_match = re.search(r"(\d+)[ -]?(month|day|year)", query)
         location = re.findall(r"in (\w+)", query)
-        procedure = re.findall(r"(knee|heart|surgery|operation|replacement)", query)
+        procedure = re.findall(r"(knee|heart|surgery|operation|replacement)", query, re.IGNORECASE)
 
         return {
             "age": age_match.group(1) if age_match else None,
@@ -55,10 +66,10 @@ def process_query(query: str, doc_dir: str):
             "duration": f"{duration_match.group(1)} {duration_match.group(2)}" if duration_match else None
         }
 
-    # Load Sentence Transformer
+    # === Load Model ===
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    # Load and chunk all documents
+    # === Load and prepare documents ===
     docs = load_documents(doc_dir)
     all_chunks, sources = [], []
     for name, text in docs:
@@ -66,22 +77,38 @@ def process_query(query: str, doc_dir: str):
             all_chunks.append(chunk)
             sources.append(name)
 
-    # Build FAISS index
+    # === FAISS Index ===
     embeddings = embed_chunks(all_chunks)
     dim = embeddings.shape[1]
     index = faiss.IndexFlatL2(dim)
     index.add(embeddings)
 
-    # Parse and search
+    # === Run semantic search ===
     query_info = parse_query(query)
-    retrieved = search(query, index, all_chunks)
-    justification = retrieved[0] if retrieved else "Not found"
-    approved = "covered" in justification.lower() or "eligible" in justification.lower()
+    retrieved_chunks = search(query, index, all_chunks)
 
-    # Return structured result
+    if retrieved_chunks:
+        justification = max(
+            retrieved_chunks,
+            key=lambda x: x.lower().count(query_info["procedure"].lower()) if query_info["procedure"] else 0
+        )
+    else:
+        justification = "Not found"
+
+        # Improved approval check
+    approval_keywords = ["covered", "eligible", "included", "reimbursed", "payable"]
+    rejection_keywords = ["not covered", "excluded", "not payable", "excluded from policy"]
+
+    is_approved = any(kw in justification.lower() for kw in approval_keywords) and not any(kw in justification.lower() for kw in rejection_keywords)
+
+    # 🔍 DEBUG LINES
+    print("🔍 Justification Chunk:", justification)
+    print("✅ Approval Check:", is_approved)
+
     return {
-        "Decision": "Approved" if approved else "Rejected",
-        "Amount": "₹50,000" if approved else "₹0",
-        "Justification": justification,
+        "Decision": "Approved" if is_approved else "Rejected",
+        "Amount": "₹50,000" if is_approved else "₹0",
+        "Justification": justification[:1000] + "..." if len(justification) > 1000 else justification,
         "ParsedQuery": query_info
     }
+
